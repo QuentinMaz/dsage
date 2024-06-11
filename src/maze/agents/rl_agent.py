@@ -39,6 +39,19 @@ class RLAgentResult:
     n_repeated_cells: int = None
 
 
+@dataclass
+class TestResult:
+    """Results from a test case execution."""
+
+    path_lengths: np.ndarray = None
+    failed_list: np.ndarray = None
+    rewards_list: np.ndarray = None
+    aug_level: np.ndarray = None
+    # n_repeated_cells: int = None
+    # n_left_turns: np.ndarray = None
+    # n_right_turns: np.ndarray = None
+
+
 class RLAgent:
     """Base class for RL agents solving mazes. Adapted from the open source
     codebase for PAIRED (https://github.com/ucl-dark/paired) and DCD
@@ -192,11 +205,13 @@ class RLAgent:
                     recurrent_hidden_states[1][i].zero_()
                     left_turns[i] = 0
                     right_turns[i] = 0
+                    # the shape is preserved
                     aug_level_ind[i] = 0
 
                     if len(returns) >= self.n_evals:
                         break
 
+        # average number of times the agent has come back to already visited cells (during the episodes)
         n_repeated_cells /= self.n_evals
         aug_level /= self.n_evals
         return RLAgentResult(

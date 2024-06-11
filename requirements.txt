@@ -52,3 +52,5 @@ torchvision==0.17.2
 gym-minigrid==1.0.1
 stable-baselines3==1.4.0
 scikit-image==0.19.2
+
+tqdm==4.66.4
