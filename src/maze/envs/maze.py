@@ -112,3 +112,73 @@ class MazeEnv(MultiGridEnv):
                 if self.bit_map[y, x]:
                     # Add an offset of 1 for the outer walls
                     self.put_obj(minigrid.Wall(), x + 1, y + 1)
+
+
+if __name__=="__main__":
+    from src.maze.level import MazeLevel
+    from src.maze.level import MazeLevel, OBJ_TYPES_TO_INT
+    from src.maze.module import MazeModule
+
+    from scipy.sparse import csgraph
+    from skimage.segmentation import flood_fill
+
+    rng = np.random.default_rng(0)
+    num_attempts = 0
+    while True:
+        num_attempts += 1
+        level = rng.integers(2, size=(16, 16))
+        adj = MazeModule._get_adj(level)
+        # Find the best distances
+        dist, predecessors = csgraph.floyd_warshall(adj,
+                                                    return_predecessors=True)
+        dist[dist == np.inf] = -np.inf  # For easier argmax to find the diameter
+
+        if dist.max() >= 1:
+            print(f"Optimal path length: {dist.max()}")
+            # Label the start and the end point
+            endpoints = np.unravel_index(dist.argmax(), dist.shape)
+            start_cell, end_cell = zip(
+                *np.unravel_index(endpoints, level.shape))
+
+            endpoint_level = level.copy()
+            endpoint_level[start_cell] = OBJ_TYPES_TO_INT["S"]
+            endpoint_level[end_cell] = OBJ_TYPES_TO_INT["G"]
+
+            # bonus: labels the path between start and goal
+            path_level = level.copy()
+            path_level[start_cell] = OBJ_TYPES_TO_INT["S"]
+            path_level[end_cell] = OBJ_TYPES_TO_INT["G"]
+            cur_cell_n = endpoints[0]
+            end_cell_n = endpoints[1]
+            while True:
+                cur_cell_n = predecessors[end_cell_n, cur_cell_n]
+                if cur_cell_n == end_cell_n:
+                    break
+                cur_cell = np.unravel_index(cur_cell_n, level.shape)
+                path_level[cur_cell] = OBJ_TYPES_TO_INT["P"]
+
+            break
+        else:
+            print(f"Attempt {num_attempts} failed.")
+    print(f"Total number of attempts: {num_attempts}")
+    print("Raw input:")
+    print(level)
+    print("Generated level:")
+    print(MazeLevel(level).to_str())
+    print("Bit map:")
+    print(level.tolist())
+    # Offset start, goal to account for the added outer walls
+    start_pos = (start_cell[1] + 1, start_cell[0] + 1)
+    goal_pos = (end_cell[1] + 1, end_cell[0] + 1)
+    print(f"Start: {start_pos}; End: {goal_pos}")
+    # print("Endpoint level:")
+    # print(MazeLevel(endpoint_level).to_str())
+    # print("Path:")
+    # print(MazeLevel(path_level).to_str())
+    env = MazeEnv(
+        agent_view_size=5,
+        size=level.shape[0] + 2,
+        bit_map=level,
+        start_pos=start_pos,
+        goal_pos=goal_pos
+    )
