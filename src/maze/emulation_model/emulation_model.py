@@ -413,7 +413,7 @@ class MazeLevelModel:
                 inputs, objs, measures, aug_lvls = sample
 
                 pred_lvls = self.network.int_to_logits(inputs)
-                loss = self.network_loss_func(
+                loss = self.loss_func(
                     nn.Flatten()(pred_lvls),
                     nn.Flatten()(aug_lvls)
                 )
@@ -498,7 +498,7 @@ class MazeLevelModel:
 if __name__=="__main__":
     model = MazeLevelModel()
     # loads solutions (mazes) and the subsequent occupancy grids
-    f = "data"
+    f = "big_dataset"
     def load_data(f: str):
         pikd = open(f + ".pickle", "rb")
         data = pkl.load(pikd)
@@ -518,7 +518,7 @@ if __name__=="__main__":
     # print(lvls.shape)
     # grids = np.squeeze(lvls, axis=1)
 
-    TRAIN = False
+    TRAIN = True
 
     if TRAIN:
 
@@ -535,6 +535,8 @@ if __name__=="__main__":
         # saves
         f = "mazemodel"
         model.save(f + ".pickle", f + ".pth")
+        # also saves the entire prediction model
+        torch.save(model.network, f + "_net.pth")
 
     else:
         # loads a trained model

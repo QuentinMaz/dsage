@@ -103,50 +103,126 @@ class CustomEnv(MazeEnv):
 
 
 def main():
-    rng = np.random.default_rng(24)
+    def get_cells(level: np.ndarray):
+        """
+        Computes the start and goal cells of the given `level`.
+        The latter is assumed to be valid.
 
-    while True:
-        level = rng.integers(2, size=(16, 16))
-        print("Generated level:")
-        print(MazeLevel(level).to_str())
-        print("Bit map:")
-        print(level.tolist())
+        Args:
+            - level (np.ndarray): bitmap of a Maze.
+        """
         adj = MazeModule._get_adj(level)
 
-        # Find the best distances
-        dist, predecessors = csgraph.floyd_warshall(adj,
-                                                    return_predecessors=True)
-        dist[dist == np.inf] = -np.inf  # For easier argmax to find the diameter
+        dist, _predecessors = csgraph.floyd_warshall(
+            adj,
+            return_predecessors=True
+        )
+        dist[dist==np.inf] = -np.inf
+        assert dist.max() >= 1
+        endpoints = np.unravel_index(dist.argmax(), dist.shape)
+        start_cell, end_cell = zip(*np.unravel_index(endpoints, level.shape))
+        return start_cell, end_cell
 
-        if dist.max() >= 1:
-            print(f"Optimal path length: {dist.max()}")
-            # Label the start and the end point
-            endpoints = np.unravel_index(dist.argmax(), dist.shape)
-            start_cell, end_cell = zip(
-                *np.unravel_index(endpoints, level.shape))
+    rng = np.random.default_rng(24)
+    random = True
+    if random:
 
-            endpoint_level = level.copy()
-            endpoint_level[start_cell] = OBJ_TYPES_TO_INT["S"]
-            endpoint_level[end_cell] = OBJ_TYPES_TO_INT["G"]
+        while True:
+            level = rng.integers(2, size=(16, 16))
+            # print("Generated level:")
+            # print(MazeLevel(level).to_str())
+            # print("Bit map:")
+            # print(level.tolist())
+            adj = MazeModule._get_adj(level)
 
-            break
+            # Find the best distances
+            dist, predecessors = csgraph.floyd_warshall(adj,
+                                                        return_predecessors=True)
+            dist[dist == np.inf] = -np.inf  # For easier argmax to find the diameter
+
+            if dist.max() >= 1:
+                # print(f"Optimal path length: {dist.max()}")
+                # Label the start and the end point
+                endpoints = np.unravel_index(dist.argmax(), dist.shape)
+                start_cell, end_cell = zip(
+                    *np.unravel_index(endpoints, level.shape))
+
+                endpoint_level = level.copy()
+                endpoint_level[start_cell] = OBJ_TYPES_TO_INT["S"]
+                endpoint_level[end_cell] = OBJ_TYPES_TO_INT["G"]
+
+                np.savetxt("level.txt", level, delimiter=',')
+                break
+    else:
+
+        f = 'level_0.txt'
+        level = np.loadtxt(f, delimiter=',')
+        start_cell, end_cell = get_cells(level)
 
     # Offset start, goal to account for the added outer walls
     start_pos = (start_cell[1] + 1, start_cell[0] + 1)
     goal_pos = (end_cell[1] + 1, end_cell[0] + 1)
     print(f"Start: {start_pos}; End: {goal_pos}")
-    env_func = partial(MazeEnv,
-                       size=level.shape[0] + 2,
-                       bit_map=level,
-                       start_pos=start_pos,
-                       goal_pos=goal_pos)
+    env_func = partial(
+        MazeEnv,
+        size=level.shape[0] + 2,
+        bit_map=level,
+        start_pos=start_pos,
+        goal_pos=goal_pos
+    )
     # env_func = LabyrinthEnv
     # env_func = LargeCorridorEnv
     # env_func = CustomEnv
-    rl_agent_conf = RLAgentConfig(recurrent_hidden_size=256,
-                                  model_path="accel_seed_1/model_20000.tar")
-    rl_agent = RLAgent(env_func, n_evals=100, config=rl_agent_conf)
+    rl_agent_conf = RLAgentConfig(
+        recurrent_hidden_size=256,
+        model_path="accel_seed_1/model_20000.tar"
+    )
+    # n_evals is the number of episodes (!!!) evaluated
+    # what about the occupancy grid?
+
+    rl_agent = RLAgent(env_func, n_evals=20, config=rl_agent_conf)
+    # print('n_envs', rl_agent.n_envs)
+    # print('n_evals', rl_agent.n_evals)
+    # print(type(obs), obs['image'].shape, obs['x'])
+    # import torch
+    # actions = []
+    # masks = torch.ones(1, device="cpu")
+    # recurrent_hidden_states = (torch.zeros(rl_agent.n_envs,
+    #                                     rl_agent.recurrent_hidden_size,
+    #                                     device="cpu"),
+    #                         torch.zeros(rl_agent.n_envs,
+    #                                     rl_agent.recurrent_hidden_size,
+    #                                     device="cpu"))
+    # ref_obs = rl_agent.vec_env.reset()['image'].cpu().numpy()[0]
+    # print(ref_obs)
+    # from PIL import Image
+    # for i in range(10):
+    #     obs = rl_agent.vec_env.reset()
+
+    #     with torch.no_grad():
+    #         _, action, _, recurrent_hidden_states = rl_agent.model.act(
+    #             obs, recurrent_hidden_states, masks)
+    #     action = action.cpu().numpy()
+    #     actions.append([a for a in action])
+    #     o = obs['image'].cpu().numpy()[0]
+    #     print(np.array_equal(ref_obs, o))
+    #     Image.fromarray(rl_agent.vec_env.render("rgb_array")).save(f"{i}.png")
+
+    # print(len(np.unique(actions)))
+    # print(np.unique(actions))
+
+    print(rl_agent.vec_env.envs[0].max_steps)
     rl_result = rl_agent.eval_and_track(level_shape=level.shape)
+    print(rl_result.path_lengths)
+    print(rl_result.failed_list)
+
+    # grid = rl_result.aug_level.tolist()
+    # print('')
+    # for g in grid:
+    #     print(g)
+    # print('')
+    return
+
     # objs, aug_level, n_left_turns, n_right_turns = rl_agent.eval_and_track(
     #     level_shape=level.shape,
     #     obj_type="path_length",
