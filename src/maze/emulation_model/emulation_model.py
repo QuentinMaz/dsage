@@ -11,9 +11,9 @@ import torch
 from torch import nn
 
 from src.device import DEVICE
-from src.maze.emulation_model.aug_buffer import AugBuffer
+from src.maze.emulation_model.aug_buffer import AugBuffer, AugExperience
 from src.maze.emulation_model.buffer import Buffer, Experience
-from src.maze.emulation_model.networks import MazeConvolutional
+from src.maze.emulation_model.networks import MazeAugResnetOccupancy, MazeConvolutional
 
 logger = logging.getLogger(__name__)
 # Just to get rid of pylint warning about unused import
@@ -315,3 +315,241 @@ class MazeEmulationModel:
         self.optimizer.load_state_dict(pytorch_data["optimizer"])
         self.torch_rng.set_state(pytorch_data["torch_rng"])
         return self
+
+
+class MazeLevelModel:
+    """Class for training and predicting occupancy grids (i.e., augmented levels) for Maze.
+
+    Args:
+        i_size (int): Size of input image.
+        nc (int): Number of input channels.
+        ndf (int): Number of output channels of conv2d layer.
+        n_res_layers (int): Number of residual layers (2x conv per residual layer).
+        train_batch_size (int): Batch size for each epoch of training.
+        train_sample_size (int): Number of samples to choose for training. Set
+            to None if all available data should be used. (default: None)
+        train_sample_type (str): One of the following
+            "random": Choose `n` uniformly random samples;
+            "recent": Choose `n` most recent samples;
+            "weighted": Choose samples s.t., on average, all samples are seen
+                the same number of times across training iterations.
+            (default: "recent")
+        seed (int): Master seed. Passed in from Manager.
+
+    Usage:
+        model = MazeLevelModel(...)
+
+        # Add inputs, objectives, measures to use for training.
+        model.add(data)
+
+        # Training hyperparameters should be passed in at initialization.
+        model.train()
+
+        # Ask for augmented levels (occupancy grids)
+        model.predict(...)
+    """
+
+    def __init__(
+        self,
+        i_size: int = 16,
+        nc: int = 4,
+        ndf: int = 64,
+        n_res_layers = 2,
+        train_epochs: int = 200,
+        train_batch_size: int = 64,
+        train_sample_size: int = 20000,
+        train_sample_type: str = "recent",
+        seed: int = 2024,
+    ):
+
+        self.rng = np.random.default_rng(seed)
+
+        self.network = MazeAugResnetOccupancy(
+            i_size=i_size,
+            nc=nc,
+            ndf=ndf,
+            n_res_layers=n_res_layers
+        ).load_from_saved_weights().to(
+            DEVICE)
+        self.dataset = AugBuffer(seed=seed)
+        params = list(self.network.parameters())
+
+        self.optimizer = torch.optim.Adam(params)
+        self.loss_func = torch.nn.MSELoss()
+
+        self.train_epochs = train_epochs
+        self.train_batch_size = train_batch_size
+        self.train_sample_size = train_sample_size
+        self.train_sample_type = train_sample_type
+
+        self.torch_rng = torch.Generator("cpu")  # Required to be on CPU.
+        self.torch_rng.manual_seed(seed)
+
+    def add(self, e: AugExperience):
+        """Adds an experience to the buffer."""
+        self.dataset.add(e)
+
+    def train(self):
+        """Trains for self.train_epochs epochs on the entire dataset."""
+        if len(self.dataset) == 0:
+            logger.warning("Skipping training as dataset is empty")
+            return
+
+        self.network.train()
+
+        dataloader = self.dataset.to_dataloader(
+            self.train_batch_size,
+            self.torch_rng,
+            self.train_sample_size,
+            self.train_sample_type
+        )
+
+        logger.warning(f"Using {len(dataloader.dataset)} samples to train.")
+
+        for _ in range(self.train_epochs):
+            epoch_loss = 0.0
+
+            for sample in dataloader:
+                inputs, objs, measures, aug_lvls = sample
+
+                pred_lvls = self.network.int_to_logits(inputs)
+                loss = self.network_loss_func(
+                    nn.Flatten()(pred_lvls),
+                    nn.Flatten()(aug_lvls)
+                )
+                # pre_loss = pre_loss_func(pred_pre_lvls, aug_lvls.long())
+
+                epoch_loss += loss.item()
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+            logger.warning(f"Loss: {epoch_loss}")
+
+    def predict_with_grad(self, inputs: torch.Tensor):
+        """Same as predict() but does not convert to/from numpy."""
+        aug_lvls = self.network.int_to_logits(inputs)
+        return aug_lvls
+
+    def predict(self, inputs: np.ndarray) -> np.ndarray:
+        """Predicts occupancy grids (augmented levels) for a batch of solutions.
+
+        Args:
+            inputs (np.ndarray): Batch of solutions to predict.
+        Returns:
+            Batch of occupancy grids (augmented levels).
+        """
+        self.network.eval()
+
+        # Handle no_grad here since we expect everything to be numpy arrays.
+        with torch.no_grad():
+            aug_lvls = self.predict_with_grad(
+                torch.as_tensor(inputs, device=DEVICE)
+            )
+        return aug_lvls.cpu().detach().numpy()
+
+    def save(self, pickle_filepath: str, pytorch_filepath: str):
+        """Saves data to a pickle file and a PyTorch file.
+
+        The PyTorch file holds the network and the optimizer, and the pickle
+        file holds the rng and the dataset. See here for more info:
+        https://pytorch.org/tutorials/beginner/saving_loading_models.html#save
+        """
+        pickle_path = Path(pickle_filepath)
+        pytorch_path = Path(pytorch_filepath)
+
+        logger.info("Saving MazeLevelModel pickle data")
+        with pickle_path.open("wb") as file:
+            cloudpickle.dump(
+                {
+                    "rng": self.rng,
+                    "dataset": self.dataset,
+                },
+                file,
+            )
+
+        logger.info("Saving MazeLevelModel PyTorch data")
+        state_dict = {
+            "network": self.network.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "torch_rng": self.torch_rng.get_state(),
+        }
+
+        torch.save(state_dict, pytorch_path)
+
+    def load(self, pickle_filepath: str, pytorch_filepath: str):
+        """Loads data from files saved by save()."""
+        pickle_path = Path(pickle_filepath)
+        pytorch_path = Path(pytorch_filepath)
+
+        with open(pickle_path, "rb") as file:
+            pickle_data = pkl.load(file)
+            self.rng = pickle_data["rng"]
+            self.dataset = pickle_data["dataset"]
+
+        pytorch_data = torch.load(pytorch_path)
+        self.network.load_state_dict(pytorch_data["network"])
+        self.optimizer.load_state_dict(pytorch_data["optimizer"])
+        self.torch_rng.set_state(pytorch_data["torch_rng"])
+        return self
+
+
+if __name__=="__main__":
+    model = MazeLevelModel()
+    # loads solutions (mazes) and the subsequent occupancy grids
+    f = "data"
+    def load_data(f: str):
+        pikd = open(f + ".pickle", "rb")
+        data = pkl.load(pikd)
+        pikd.close()
+        return data
+    inputs = load_data(f + "_lvls")
+    grids = load_data(f + "_aug_lvls")
+    if not isinstance(inputs, np.ndarray):
+        inputs = np.array(inputs)
+    if not isinstance(grids, np.ndarray):
+        grids = np.array(grids)
+    print("Dataset info:")
+    print(inputs.shape)
+    print(grids.shape)
+
+    # lvls = model.predict(inputs)
+    # print(lvls.shape)
+    # grids = np.squeeze(lvls, axis=1)
+
+    TRAIN = False
+
+    if TRAIN:
+
+        # fills the dataset
+        print("Filling the AugBuffer...")
+        for x, y in zip(inputs, grids):
+            e = AugExperience(None, x, 0.0, 0.0, y)
+            model.add(e)
+
+        # trains
+        print("Training...")
+        model.train()
+
+        # saves
+        f = "mazemodel"
+        model.save(f + ".pickle", f + ".pth")
+
+    else:
+        # loads a trained model
+        f = "mazemodel"
+        model.load(f + ".pickle", f + ".pth")
+        rng = np.random.default_rng()
+        index = rng.integers(low=0, high=len(inputs))
+        lvl = np.array([inputs[index]])
+        aug_lvl = grids[index]
+        pred = np.squeeze(model.predict(lvl), axis=1)
+        print("Aug level:")
+        for e in aug_lvl:
+            print(e)
+        print("-------------")
+        print("Pred:")
+        for e in pred:
+            print(e)
+        print("-------------")
